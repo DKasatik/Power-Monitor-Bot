@@ -1,0 +1,14 @@
+ACCESS_ID = "5vktvx4entemamnk88a3"
+ACCESS_KEY = "5c37f96a7c9845679d148748665a5fd8"
+DEVICE_ID = "bf277e6be12272ce4b05uv"
+USERNAME = "ivanovdmitro684@gmail.com"
+PASSWORD = "tu7grHBSjFZ8Sk8"
+ENDPOINT = "https://openapi.tuyaeu.com"
+TG_TOKEN = "7380830156:AAEkGVktIfjgUP_TFQ-bXcfedF_f91AuVuE"
+CHAT_ID = "440255381"
+YASNO_GROUP = "6.2"  # Ваша група відключень
+YASNO_REGION = "25"  # Київ
+YASNO_DSO = "902"    # ДТЕК Київські електромережі
+POLL_INTERVAL = 5  # Інтервал перевірки розетки (секунди)
+YASNO_API_URL = "https://app.yasno.ua/api/blackout-service/public/shutdowns/regions/{YASNO_REGION}/dsos/{YASNO_DSO}/planned-outages"
+TELEGRAM_API_URL = "https://api.telegram.org/bot{TG_TOKEN}"
