@@ -243,14 +243,6 @@ pip install tuya-connector-python
 
 Створено для допомоги українцям під час енергетичної кризи 🇺🇦
 
-## 📞 Підтримка
-
-Якщо у вас виникли питання або проблеми:
-
-- 📧 Email: your.email@example.com
-- 💬 Telegram: [@yourusername](https://t.me/yourusernaze)
-- 🐛 Issues: [GitHub Issues](https://github.com/yourusername/power-monitor-bot/issues)
-
 ---
 
 **Зроблено з ❤️ для України 🇺🇦**
