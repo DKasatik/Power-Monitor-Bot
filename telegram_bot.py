@@ -5,12 +5,16 @@
 
 import threading
 from datetime import datetime
+import pytz
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 from config import TG_TOKEN, CHAT_ID, POLL_INTERVAL
 from yasno_parser import YasnoParser
 from tuya_monitor import TuyaMonitor
+
+# Український часовий пояс
+KYIV_TZ = pytz.timezone('Europe/Kiev')
 
 
 class PowerMonitorBot:
@@ -29,6 +33,10 @@ class PowerMonitorBot:
         
         # Встановлюємо callback для Tuya
         self.tuya.set_on_status_change(self.on_power_change)
+    
+    def get_kyiv_time(self):
+        """Повертає поточний час у київському часовому поясі"""
+        return datetime.now(KYIV_TZ)
     
     def get_keyboard(self):
         """Створює клавіатуру з кнопками"""
@@ -65,8 +73,8 @@ class PowerMonitorBot:
             has_power: True - світло з'явилось, False - світло зникло
             duration_seconds: тривалість попереднього стану
         """
-        # Форматуємо повідомлення
-        now_str = datetime.now().strftime("%H:%M")
+        # Форматуємо повідомлення з українським часом
+        now_str = self.get_kyiv_time().strftime("%H:%M")
         duration_text = self.tuya.format_duration(duration_seconds)
         
         if has_power:
@@ -128,8 +136,10 @@ class PowerMonitorBot:
         else:
             emoji = "🟢" if info['has_power'] else "🔴"
             status_text = "Світло Є" if info['has_power'] else "Світла немає"
+            # Використовуємо київський час
+            kyiv_time = self.get_kyiv_time().strftime("%H:%M")
             text = (
-                f"{emoji} {info['timestamp']} {status_text}\n"
+                f"{emoji} {kyiv_time} {status_text}\n"
                 f"⏱ У цьому стані: {info['duration_text']}"
             )
             
@@ -147,7 +157,12 @@ class PowerMonitorBot:
         
         if update.callback_query:
             await update.callback_query.answer()
-            await update.callback_query.edit_message_text(text, reply_markup=self.get_keyboard())
+            try:
+                await update.callback_query.edit_message_text(text, reply_markup=self.get_keyboard())
+            except Exception as e:
+                # Ігноруємо помилку якщо повідомлення не змінилось
+                if "Message is not modified" not in str(e):
+                    print(f"⚠️ Помилка редагування повідомлення: {e}")
         else:
             await update.message.reply_text(text, reply_markup=self.get_keyboard())
     
@@ -160,7 +175,12 @@ class PowerMonitorBot:
         
         if update.callback_query:
             await update.callback_query.answer()
-            await update.callback_query.edit_message_text(text, reply_markup=self.get_keyboard())
+            try:
+                await update.callback_query.edit_message_text(text, reply_markup=self.get_keyboard())
+            except Exception as e:
+                # Ігноруємо помилку якщо повідомлення не змінилось
+                if "Message is not modified" not in str(e):
+                    print(f"⚠️ Помилка редагування повідомлення: {e}")
         else:
             await update.message.reply_text(text, reply_markup=self.get_keyboard())
     
@@ -182,6 +202,7 @@ class PowerMonitorBot:
     def run(self):
         """Запускає бота"""
         print("🚀 Запуск бота...")
+        print(f"🕐 Поточний час (Київ): {self.get_kyiv_time().strftime('%Y-%m-%d %H:%M:%S')}")
         
         # Завантажуємо початковий графік
         self.yasno.fetch_schedule()
