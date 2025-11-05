@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  bot:
+    build: .
+    container_name: power_monitor_bot
+    restart: unless-stopped
+    volumes:
+      # Монтуємо config.py для легкої зміни конфігурації
+      - ./config.py:/app/config.py:ro
+    environment:
+      - TZ=Europe/Kiev
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4

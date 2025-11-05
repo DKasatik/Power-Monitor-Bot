@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  # OpenVPN клієнт контейнер
+  vpn:
+    image: dperson/openvpn-client:latest
+    container_name: power_monitor_vpn
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    restart: unless-stopped
+    volumes:
+      # Покладіть ваш .ovpn файл у папку vpn/
+      - ./vpn:/vpn
+    environment:
+      # Вкажіть ім'я вашого .ovpn файлу без шляху
+      - VPNCONFIG=config.ovpn
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+
+  # Ваш Power Monitor Bot
+  bot:
+    build: .
+    container_name: power_monitor_bot
+    # Використовуємо мережу VPN контейнера
+    network_mode: "service:vpn"
+    depends_on:
+      - vpn
+    restart: unless-stopped
+    volumes:
+      # Монтуємо config.py для легкої зміни конфігурації
+      - ./config.py:/app/config.py:ro
+    # Чекаємо 10 секунд поки VPN підключиться
+    entrypoint: ["/bin/sh", "-c", "sleep 10 && python -u telegram_bot.py"]
