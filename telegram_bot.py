@@ -1,6 +1,6 @@
 # telegram_bot.py
 """
-Головний Telegram бот для моніторингу електропостачання
+Головний Telegram бот для моніторингу електропостачання з PostgreSQL
 """
 
 import threading
@@ -12,6 +12,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from config import TG_TOKEN, CHAT_ID, POLL_INTERVAL
 from yasno_parser import YasnoParser
 from tuya_monitor import TuyaMonitor
+from database import DatabaseManager
 
 # Український часовий пояс
 KYIV_TZ = pytz.timezone('Europe/Kiev')
@@ -24,11 +25,14 @@ class PowerMonitorBot:
         self.app = Application.builder().token(TG_TOKEN).build()
         self.yasno = YasnoParser()
         self.tuya = TuyaMonitor()
+        self.db = DatabaseManager()
         
         # Реєструємо обробники
         self.app.add_handler(CommandHandler("start", self.cmd_start))
         self.app.add_handler(CommandHandler("status", self.cmd_status))
         self.app.add_handler(CommandHandler("schedule", self.cmd_schedule))
+        self.app.add_handler(CommandHandler("stats", self.cmd_stats))
+        self.app.add_handler(CommandHandler("history", self.cmd_history))
         self.app.add_handler(CallbackQueryHandler(self.button_handler))
         
         # Встановлюємо callback для Tuya
@@ -42,8 +46,12 @@ class PowerMonitorBot:
         """Створює клавіатуру з кнопками"""
         keyboard = [
             [
-                InlineKeyboardButton("📊 Переглянути графік", callback_data="schedule"),
-                InlineKeyboardButton("🔌 Статус розетки", callback_data="status")
+                InlineKeyboardButton("📊 Графік", callback_data="schedule"),
+                InlineKeyboardButton("🔌 Статус", callback_data="status")
+            ],
+            [
+                InlineKeyboardButton("📈 Статистика", callback_data="stats"),
+                InlineKeyboardButton("📜 Історія", callback_data="history")
             ]
         ]
         return InlineKeyboardMarkup(keyboard)
@@ -77,6 +85,23 @@ class PowerMonitorBot:
         now_str = self.get_kyiv_time().strftime("%H:%M")
         duration_text = self.tuya.format_duration(duration_seconds)
         
+        # Перевіряємо чи це планове відключення
+        self.yasno.fetch_schedule()
+        is_planned, end_time = self.yasno.is_outage_planned()
+        yasno_schedule = self.yasno.get_full_schedule_text() if not has_power else None
+        
+        # Зберігаємо подію в БД
+        self.db.save_power_event(
+            has_power=has_power,
+            duration_seconds=duration_seconds,
+            is_planned=is_planned if not has_power else False,
+            expected_end_time=end_time,
+            yasno_schedule=yasno_schedule
+        )
+        
+        # Оновлюємо поточний стан
+        self.db.update_current_state(has_power)
+        
         if has_power:
             # Світло з'явилось
             emoji = "🟢"
@@ -88,10 +113,6 @@ class PowerMonitorBot:
             emoji = "🔴"
             status_text = "Світла немає"
             duration_info = f"⏱ Світло було {duration_text}"
-            
-            # Перевіряємо чи це планове відключення
-            self.yasno.fetch_schedule()
-            is_planned, end_time = self.yasno.is_outage_planned()
             
             if is_planned:
                 outage_type = f"\n📋 Відключення за графіком Yasno"
@@ -119,10 +140,13 @@ class PowerMonitorBot:
             "Я автоматично відстежую:\n"
             "• 🔌 Статус розетки (кожні 5 сек)\n"
             "• 📊 Графік відключень YASNO\n"
-            "• ⚡ Тип відключення (планове/аварійне)\n\n"
+            "• ⚡ Тип відключення (планове/аварійне)\n"
+            "• 📈 Статистику відключень\n\n"
             "Команди:\n"
             "/status - поточний статус розетки\n"
-            "/schedule - графік відключень\n\n"
+            "/schedule - графік відключень\n"
+            "/stats - статистика відключень\n"
+            "/history - останні 10 подій\n\n"
             "Або використовуйте кнопки нижче 👇"
         )
         await update.message.reply_text(welcome_text, reply_markup=self.get_keyboard())
@@ -136,7 +160,6 @@ class PowerMonitorBot:
         else:
             emoji = "🟢" if info['has_power'] else "🔴"
             status_text = "Світло Є" if info['has_power'] else "Світла немає"
-            # Використовуємо київський час
             kyiv_time = self.get_kyiv_time().strftime("%H:%M")
             text = (
                 f"{emoji} {kyiv_time} {status_text}\n"
@@ -160,9 +183,8 @@ class PowerMonitorBot:
             try:
                 await update.callback_query.edit_message_text(text, reply_markup=self.get_keyboard())
             except Exception as e:
-                # Ігноруємо помилку якщо повідомлення не змінилось
                 if "Message is not modified" not in str(e):
-                    print(f"⚠️ Помилка редагування повідомлення: {e}")
+                    print(f"⚠️ Помилка редагування: {e}")
         else:
             await update.message.reply_text(text, reply_markup=self.get_keyboard())
     
@@ -178,9 +200,88 @@ class PowerMonitorBot:
             try:
                 await update.callback_query.edit_message_text(text, reply_markup=self.get_keyboard())
             except Exception as e:
-                # Ігноруємо помилку якщо повідомлення не змінилось
                 if "Message is not modified" not in str(e):
-                    print(f"⚠️ Помилка редагування повідомлення: {e}")
+                    print(f"⚠️ Помилка редагування: {e}")
+        else:
+            await update.message.reply_text(text, reply_markup=self.get_keyboard())
+    
+    async def cmd_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обробник команди /stats - статистика відключень"""
+        # Отримуємо статистику за сьогодні
+        today_stats = self.db.get_today_statistics()
+        
+        # Отримуємо статистику за тиждень
+        week_stats = self.db.get_daily_statistics(7)
+        
+        text = "📈 Статистика відключень\n\n"
+        
+        # Сьогоднішня статистика
+        if today_stats and today_stats['total_outages'] > 0:
+            text += f"📅 Сьогодні ({self.get_kyiv_time().strftime('%d.%m.%Y')}):\n"
+            text += f"  • Всього відключень: {today_stats['total_outages']}\n"
+            text += f"  • Планових: {today_stats['planned_outages']}\n"
+            text += f"  • Аварійних: {today_stats['emergency_outages']}\n"
+            text += f"  • Загальна тривалість: {self.db.format_duration(today_stats['total_outage_duration_seconds'])}\n"
+            text += f"  • Найдовше: {self.db.format_duration(today_stats['longest_outage_seconds'])}\n\n"
+        else:
+            text += "📅 Сьогодні відключень не було ✅\n\n"
+        
+        # Тижнева статистика
+        if week_stats:
+            text += "📊 За останні 7 днів:\n"
+            total_outages = sum(s['total_outages'] for s in week_stats)
+            total_planned = sum(s['planned_outages'] for s in week_stats)
+            total_emergency = sum(s['emergency_outages'] for s in week_stats)
+            
+            text += f"  • Всього відключень: {total_outages}\n"
+            text += f"  • Планових: {total_planned}\n"
+            text += f"  • Аварійних: {total_emergency}\n"
+        
+        if update.callback_query:
+            await update.callback_query.answer()
+            try:
+                await update.callback_query.edit_message_text(text, reply_markup=self.get_keyboard())
+            except Exception as e:
+                if "Message is not modified" not in str(e):
+                    print(f"⚠️ Помилка редагування: {e}")
+        else:
+            await update.message.reply_text(text, reply_markup=self.get_keyboard())
+    
+    async def cmd_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обробник команди /history - історія подій"""
+        events = self.db.get_recent_events(10)
+        
+        if not events:
+            text = "📜 Історія подій порожня"
+        else:
+            text = "📜 Останні 10 подій:\n\n"
+            
+            for event in events:
+                emoji = "🟢" if event['has_power'] else "🔴"
+                status = "Світло є" if event['has_power'] else "Світла немає"
+                time_str = event['event_time'].strftime("%d.%m %H:%M")
+                duration = self.db.format_duration(event['duration_seconds'])
+                
+                event_type = ""
+                if not event['has_power']:
+                    if event['is_planned']:
+                        event_type = " (📋 планове"
+                        if event['expected_end_time']:
+                            event_type += f", до {event['expected_end_time']}"
+                        event_type += ")"
+                    else:
+                        event_type = " (⚠️ аварійне)"
+                
+                text += f"{emoji} {time_str} - {status}\n"
+                text += f"   Тривало: {duration}{event_type}\n\n"
+        
+        if update.callback_query:
+            await update.callback_query.answer()
+            try:
+                await update.callback_query.edit_message_text(text, reply_markup=self.get_keyboard())
+            except Exception as e:
+                if "Message is not modified" not in str(e):
+                    print(f"⚠️ Помилка редагування: {e}")
         else:
             await update.message.reply_text(text, reply_markup=self.get_keyboard())
     
@@ -192,6 +293,10 @@ class PowerMonitorBot:
             await self.cmd_status(update, context)
         elif query.data == "schedule":
             await self.cmd_schedule(update, context)
+        elif query.data == "stats":
+            await self.cmd_stats(update, context)
+        elif query.data == "history":
+            await self.cmd_history(update, context)
     
     def start_tuya_monitoring(self):
         """Запускає моніторинг Tuya в окремому потоці"""
