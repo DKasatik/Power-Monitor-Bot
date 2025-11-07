@@ -130,3 +130,31 @@ SELECT
 FROM power_events
 ORDER BY event_time DESC
 LIMIT 10;
+
+-- Функція для отримання статистики за період
+CREATE OR REPLACE FUNCTION get_period_statistics(start_date DATE, end_date DATE)
+RETURNS TABLE (
+    total_outages BIGINT,
+    planned_outages BIGINT,
+    emergency_outages BIGINT,
+    total_duration_seconds BIGINT,
+    avg_duration_seconds BIGINT,
+    days_with_outages BIGINT
+) AS $
+BEGIN
+    RETURN QUERY
+    SELECT 
+        SUM(ps.total_outages)::BIGINT,
+        SUM(ps.planned_outages)::BIGINT,
+        SUM(ps.emergency_outages)::BIGINT,
+        SUM(ps.total_outage_duration_seconds)::BIGINT,
+        CASE 
+            WHEN SUM(ps.total_outages) > 0 
+            THEN (SUM(ps.total_outage_duration_seconds) / SUM(ps.total_outages))::BIGINT
+            ELSE 0
+        END,
+        COUNT(DISTINCT ps.stat_date) FILTER (WHERE ps.total_outages > 0)::BIGINT
+    FROM power_statistics ps
+    WHERE ps.stat_date BETWEEN start_date AND end_date;
+END;
+$ LANGUAGE plpgsql;

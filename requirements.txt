@@ -3,3 +3,5 @@ python-telegram-bot==20.7
 tuya-connector-python
 pytz
 psycopg2-binary
+apscheduler
+tzdata

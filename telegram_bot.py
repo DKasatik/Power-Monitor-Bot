@@ -1,13 +1,15 @@
 # telegram_bot.py
 """
-Головний Telegram бот для моніторингу електропостачання з PostgreSQL
+Головний Telegram бот для моніторингу електропостачання з PostgreSQL та розкладом
 """
 
 import threading
-from datetime import datetime
+from datetime import datetime, time
 import pytz
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 from config import TG_TOKEN, CHAT_ID, POLL_INTERVAL
 from yasno_parser import YasnoParser
@@ -16,6 +18,10 @@ from database import DatabaseManager
 
 # Український часовий пояс
 KYIV_TZ = pytz.timezone('Europe/Kiev')
+
+# Нічний режим (тихі повідомлення)
+NIGHT_START = time(23, 0)  # 23:00
+NIGHT_END = time(6, 0)     # 06:00
 
 
 class PowerMonitorBot:
@@ -26,6 +32,7 @@ class PowerMonitorBot:
         self.yasno = YasnoParser()
         self.tuya = TuyaMonitor()
         self.db = DatabaseManager()
+        self.scheduler = AsyncIOScheduler(timezone=KYIV_TZ)
         
         # Реєструємо обробники
         self.app.add_handler(CommandHandler("start", self.cmd_start))
@@ -37,6 +44,50 @@ class PowerMonitorBot:
         
         # Встановлюємо callback для Tuya
         self.tuya.set_on_status_change(self.on_power_change)
+        
+        # Налаштовуємо розклад повідомлень
+        self._setup_scheduled_tasks()
+    
+    def _setup_scheduled_tasks(self):
+        """Налаштовує розклад автоматичних повідомлень"""
+        
+        # Щоденний графік о 6:15
+        self.scheduler.add_job(
+            self.send_daily_schedule,
+            CronTrigger(hour=6, minute=15, timezone=KYIV_TZ),
+            id='daily_schedule',
+            name='Щоденний графік відключень'
+        )
+        
+        # Тижнева статистика (понеділок о 9:00)
+        self.scheduler.add_job(
+            self.send_weekly_stats,
+            CronTrigger(day_of_week='mon', hour=9, minute=0, timezone=KYIV_TZ),
+            id='weekly_stats',
+            name='Тижнева статистика'
+        )
+        
+        # Місячна статистика (1-го числа о 9:00)
+        self.scheduler.add_job(
+            self.send_monthly_stats,
+            CronTrigger(day=1, hour=9, minute=0, timezone=KYIV_TZ),
+            id='monthly_stats',
+            name='Місячна статистика'
+        )
+        
+        print("✅ Розклад повідомлень налаштовано:")
+        print("   📅 Щоденний графік: 6:15")
+        print("   📊 Тижнева статистика: Понеділок 9:00")
+        print("   📈 Місячна статистика: 1-го числа 9:00")
+    
+    def is_night_time(self):
+        """Перевіряє чи зараз нічний час"""
+        current_time = self.get_kyiv_time().time()
+        
+        if NIGHT_START > NIGHT_END:  # Через північ (23:00 - 06:00)
+            return current_time >= NIGHT_START or current_time < NIGHT_END
+        else:
+            return NIGHT_START <= current_time < NIGHT_END
     
     def get_kyiv_time(self):
         """Повертає поточний час у київському часовому поясі"""
@@ -56,22 +107,113 @@ class PowerMonitorBot:
         ]
         return InlineKeyboardMarkup(keyboard)
     
-    async def send_message(self, text, show_buttons=True):
-        """Відправляє повідомлення в Telegram"""
+    async def send_message(self, text, show_buttons=True, silent=False):
+        """
+        Відправляє повідомлення в Telegram
+        
+        Args:
+            text: текст повідомлення
+            show_buttons: чи показувати кнопки
+            silent: тихе повідомлення (без звуку)
+        """
         try:
             if show_buttons:
                 await self.app.bot.send_message(
                     chat_id=CHAT_ID,
                     text=text,
-                    reply_markup=self.get_keyboard()
+                    reply_markup=self.get_keyboard(),
+                    disable_notification=silent
                 )
             else:
                 await self.app.bot.send_message(
                     chat_id=CHAT_ID,
-                    text=text
+                    text=text,
+                    disable_notification=silent
                 )
         except Exception as e:
             print(f"❌ Помилка відправки повідомлення: {e}")
+    
+    async def send_daily_schedule(self):
+        """Надсилає щоденний графік відключень о 6:15"""
+        print("📅 Надсилаю щоденний графік...")
+        
+        if not self.yasno.fetch_schedule():
+            text = "☀️ Доброго ранку!\n\n❌ Не вдалося завантажити графік відключень"
+        else:
+            schedule_text = self.yasno.get_schedule_text("today")
+            text = f"☀️ Доброго ранку!\n\n{schedule_text}"
+        
+        await self.send_message(text, show_buttons=True, silent=False)
+    
+    async def send_weekly_stats(self):
+        """Надсилає тижневу статистику (понеділок о 9:00)"""
+        print("📊 Надсилаю тижневу статистику...")
+        
+        week_stats = self.db.get_daily_statistics(7)
+        
+        if not week_stats:
+            text = "📊 Тижнева статистика\n\nДаних за минулий тиждень немає."
+            await self.send_message(text, show_buttons=True, silent=False)
+            return
+        
+        total_outages = sum(s['total_outages'] for s in week_stats)
+        total_planned = sum(s['planned_outages'] for s in week_stats)
+        total_emergency = sum(s['emergency_outages'] for s in week_stats)
+        total_duration = sum(s['total_outage_duration_seconds'] for s in week_stats)
+        
+        avg_duration = total_duration // total_outages if total_outages > 0 else 0
+        
+        text = "📊 Статистика за тиждень\n"
+        text += f"📅 {week_stats[-1]['stat_date'].strftime('%d.%m')} - {week_stats[0]['stat_date'].strftime('%d.%m.%Y')}\n\n"
+        text += f"⚡ Всього відключень: {total_outages}\n"
+        text += f"📋 Планових: {total_planned}\n"
+        text += f"⚠️ Аварійних: {total_emergency}\n\n"
+        text += f"⏱ Загальний час без світла: {self.db.format_duration(total_duration)}\n"
+        text += f"📊 Середня тривалість: {self.db.format_duration(avg_duration)}\n\n"
+        
+        # Найгірший день
+        worst_day = max(week_stats, key=lambda x: x['total_outage_duration_seconds'])
+        if worst_day['total_outages'] > 0:
+            text += f"🔴 Найгірший день: {worst_day['stat_date'].strftime('%d.%m')} "
+            text += f"({worst_day['total_outages']} відкл., {self.db.format_duration(worst_day['total_outage_duration_seconds'])})"
+        
+        await self.send_message(text, show_buttons=True, silent=False)
+    
+    async def send_monthly_stats(self):
+        """Надсилає місячну статистику (1-го числа о 9:00)"""
+        print("📈 Надсилаю місячну статистику...")
+        
+        month_stats = self.db.get_daily_statistics(30)
+        
+        if not month_stats:
+            text = "📈 Місячна статистика\n\nДаних за минулий місяць немає."
+            await self.send_message(text, show_buttons=True, silent=False)
+            return
+        
+        total_outages = sum(s['total_outages'] for s in month_stats)
+        total_planned = sum(s['planned_outages'] for s in month_stats)
+        total_emergency = sum(s['emergency_outages'] for s in month_stats)
+        total_duration = sum(s['total_outage_duration_seconds'] for s in month_stats)
+        
+        avg_duration = total_duration // total_outages if total_outages > 0 else 0
+        days_with_outages = sum(1 for s in month_stats if s['total_outages'] > 0)
+        
+        text = "📈 Статистика за місяць\n"
+        text += f"📅 {month_stats[-1]['stat_date'].strftime('%B %Y')}\n\n"
+        text += f"⚡ Всього відключень: {total_outages}\n"
+        text += f"📋 Планових: {total_planned}\n"
+        text += f"⚠️ Аварійних: {total_emergency}\n\n"
+        text += f"📆 Днів з відключеннями: {days_with_outages} з {len(month_stats)}\n"
+        text += f"⏱ Загальний час без світла: {self.db.format_duration(total_duration)}\n"
+        text += f"📊 Середня тривалість: {self.db.format_duration(avg_duration)}\n\n"
+        
+        # Найгірший день
+        worst_day = max(month_stats, key=lambda x: x['total_outage_duration_seconds'])
+        if worst_day['total_outages'] > 0:
+            text += f"🔴 Найгірший день: {worst_day['stat_date'].strftime('%d.%m')} "
+            text += f"({worst_day['total_outages']} відкл., {self.db.format_duration(worst_day['total_outage_duration_seconds'])})"
+        
+        await self.send_message(text, show_buttons=True, silent=False)
     
     def on_power_change(self, has_power, duration_seconds):
         """
@@ -102,6 +244,10 @@ class PowerMonitorBot:
         # Оновлюємо поточний стан
         self.db.update_current_state(has_power)
         
+        # Визначаємо чи тихе повідомлення
+        is_silent = self.is_night_time()
+        night_indicator = " 🌙" if is_silent else ""
+        
         if has_power:
             # Світло з'явилось
             emoji = "🟢"
@@ -121,7 +267,7 @@ class PowerMonitorBot:
             else:
                 outage_type = "\n⚠️ Аварійне відключення (не за графіком)"
         
-        message = f"{emoji} {now_str} {status_text}\n{duration_info}{outage_type}"
+        message = f"{emoji} {now_str} {status_text}{night_indicator}\n{duration_info}{outage_type}"
         
         # Відправляємо повідомлення (синхронний виклик)
         import asyncio
@@ -131,7 +277,7 @@ class PowerMonitorBot:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
         
-        loop.run_until_complete(self.send_message(message, show_buttons=True))
+        loop.run_until_complete(self.send_message(message, show_buttons=True, silent=is_silent))
     
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обробник команди /start"""
@@ -142,11 +288,16 @@ class PowerMonitorBot:
             "• 📊 Графік відключень YASNO\n"
             "• ⚡ Тип відключення (планове/аварійне)\n"
             "• 📈 Статистику відключень\n\n"
+            "📅 Автоматичні повідомлення:\n"
+            "• 6:15 - щоденний графік\n"
+            "• Понеділок 9:00 - тижнева статистика\n"
+            "• 1-го числа 9:00 - місячна статистика\n\n"
+            "🌙 Нічний режим (23:00-6:00) - тихі сповіщення\n\n"
             "Команди:\n"
-            "/status - поточний статус розетки\n"
+            "/status - поточний статус\n"
             "/schedule - графік відключень\n"
-            "/stats - статистика відключень\n"
-            "/history - останні 10 подій\n\n"
+            "/stats - статистика\n"
+            "/history - історія подій\n\n"
             "Або використовуйте кнопки нижче 👇"
         )
         await update.message.reply_text(welcome_text, reply_markup=self.get_keyboard())
@@ -207,10 +358,7 @@ class PowerMonitorBot:
     
     async def cmd_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обробник команди /stats - статистика відключень"""
-        # Отримуємо статистику за сьогодні
         today_stats = self.db.get_today_statistics()
-        
-        # Отримуємо статистику за тиждень
         week_stats = self.db.get_daily_statistics(7)
         
         text = "📈 Статистика відключень\n\n"
@@ -308,12 +456,20 @@ class PowerMonitorBot:
         """Запускає бота"""
         print("🚀 Запуск бота...")
         print(f"🕐 Поточний час (Київ): {self.get_kyiv_time().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"🌙 Нічний режим: {NIGHT_START.strftime('%H:%M')} - {NIGHT_END.strftime('%H:%M')}")
         
         # Завантажуємо початковий графік
         self.yasno.fetch_schedule()
         
         # Запускаємо моніторинг Tuya
         self.start_tuya_monitoring()
+        
+        # Додаємо callback для запуску scheduler після створення event loop
+        async def post_init(application):
+            self.scheduler.start()
+            print("✅ Scheduler запущено")
+        
+        self.app.post_init = post_init
         
         # Запускаємо бота
         print("✅ Бот запущено! Натисніть Ctrl+C для зупинки.")
